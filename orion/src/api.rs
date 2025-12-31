@@ -26,6 +26,8 @@ pub struct BuildResult {
     /// Process exit code (None if not yet completed)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i32>,
+    /// Whether the build can auto retry
+    pub can_auto_retry: bool,
     /// Human-readable status or error message
     pub message: String,
 }
@@ -62,7 +64,7 @@ pub async fn buck_build(
         )
         .await
         {
-            Ok(status) => {
+            Ok((status, mut auto_retry_judger)) => {
                 let message = format!(
                     "Build {}",
                     if status.success() {
@@ -77,10 +79,13 @@ pub async fn buck_build(
                     message,
                     status.code()
                 );
+                // WARN: if not have status.code(), auto retry will be false
+                auto_retry_judger.judge_by_exit_code(status.code().unwrap_or(1));
                 BuildResult {
                     success: status.success(),
                     id: id_str.clone(),
                     exit_code: status.code(),
+                    can_auto_retry: auto_retry_judger.get_can_auto_retry(),
                     message,
                 }
             }
@@ -91,6 +96,7 @@ pub async fn buck_build(
                     success: false,
                     id: id_str.clone(),
                     exit_code: None,
+                    can_auto_retry: false,
                     message: error_msg,
                 }
             }
@@ -113,10 +119,12 @@ pub async fn buck_build(
     });
 
     // Return immediate acknowledgment of task acceptance
+    // WARN: exit_code and can_auto_retry is invalid data
     BuildResult {
         success: true,
         id: id.to_string(),
         exit_code: None,
+        can_auto_retry: false,
         message: "Build task has been accepted and started.".to_string(),
     }
 }

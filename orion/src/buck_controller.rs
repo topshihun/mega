@@ -1,3 +1,4 @@
+use crate::auto_retry::AutoRetryJudger;
 use crate::repo::diff;
 use crate::repo::sapling::status::Status;
 use crate::ws::{TaskPhase, WSMessage};
@@ -510,7 +511,7 @@ pub async fn build(
     cl: String,
     sender: UnboundedSender<WSMessage>,
     changes: Vec<Status<ProjectRelativePath>>,
-) -> Result<ExitStatus, Box<dyn Error + Send + Sync>> {
+) -> Result<(ExitStatus, AutoRetryJudger), Box<dyn Error + Send + Sync>> {
     tracing::info!("[Task {}] Building in repo '{}'", id, repo);
 
     let (mount_point, mount_id) = mount_antares_fs(&id, &repo, Some(&cl)).await?;
@@ -544,11 +545,16 @@ pub async fn build(
     let mut stdout_reader = tokio::io::BufReader::new(stdout).lines();
     let mut stderr_reader = tokio::io::BufReader::new(stderr).lines();
 
+    let mut auto_retry_judger = AutoRetryJudger::new();
+
     loop {
         tokio::select! {
             result = stdout_reader.next_line() => {
                 match result {
                     Ok(Some(line)) => {
+                        // judge is_retry by out line
+                        auto_retry_judger.judge_by_output(&line);
+
                         if sender.send(WSMessage::BuildOutput { id: id.clone(), output: line }).is_err() {
                             child.kill().await?;
                             return Err("WebSocket connection lost during build.".into());
@@ -564,6 +570,9 @@ pub async fn build(
             result = stderr_reader.next_line() => {
                 match result {
                     Ok(Some(line)) => {
+                        // judeg is_retry by out line
+                        auto_retry_judger.judge_by_output(&line);
+
                         if sender.send(WSMessage::BuildOutput { id: id.clone(), output: line }).is_err() {
                             child.kill().await?;
                             return Err("WebSocket connection lost during build.".into());
@@ -579,13 +588,13 @@ pub async fn build(
             status = child.wait() => {
                 let exit_status = status?;
                 tracing::info!("[Task {}] Buck2 process finished with status: {}", id, exit_status);
-                return Ok(exit_status);
+                return Ok((exit_status, auto_retry_judger));
             }
         }
     }
 
     let status = child.wait().await?;
-    Ok(status)
+    Ok((status, auto_retry_judger))
 }
 
 #[cfg(test)]
